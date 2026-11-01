@@ -1,0 +1,301 @@
+# AcuGIS Report Server — Docker Compose (packaging only)
+# Usage (from this directory):
+#   docker compose run --rm -it report-server-setup
+#   docker compose up -d
+# setup writes .env. Later up / down / restart / upgrade commands do not rotate
+# the generated database password.
+#
+# This file pulls a published image. A local source build is compose.build.yml.
+#
+# Architecture:
+#   report-server     = existing jrs-server + Tomcat 10 + Jakarta WAR (one container)
+#   report-designer   = Designer Web 1.0.8 on report-server's network namespace
+#   report-scheduler  = existing jrs-schedule-dispatcher -> jrs-run-schedule
+#   postgres          = application database (replace with external PG via JRS_DB_* if desired)
+#
+# Designer listens on 127.0.0.1:8787 inside the report-server namespace.
+# Do not publish 8787. The browser uses Report Server on port 9088.
+#
+# Native Ubuntu installs continue to use systemd timers; they do not use this
+# scheduler service.
+
+name: acugis-report-server
+
+services:
+  postgres:
+    image: postgres:16.9-alpine
+    environment:
+      POSTGRES_DB: ${JRS_DB_NAME:-jasper_reports}
+      POSTGRES_USER: ${JRS_DB_USER:-jasper}
+      # Same JRS_DB_PASS Report Server uses. There is no second database password.
+      # No :? here. setup must be able to run before .env exists.
+      # Empty and example values are refused below, before PostgreSQL initializes.
+      POSTGRES_PASSWORD: ${JRS_DB_PASS:-}
+    # Stop before PostgreSQL initializes the data directory with a missing or example password.
+    # Report Server and the scheduler repeat the credential check in the image entrypoint.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$POSTGRES_PASSWORD" ] || [ "$$POSTGRES_PASSWORD" = "change-me-strong-password" ]; then
+          printf '%s\n' \
+            'ERROR: Report Server database password is missing or still the example value.' \
+            '' \
+            'Run setup before starting the stack:' \
+            '' \
+            '  docker compose run --rm -it report-server-setup' \
+            '' \
+            'Then run:' \
+            '' \
+            '  docker compose up -d' >&2
+          exit 1
+        fi
+        exec docker-entrypoint.sh postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    # Not published to the host by default (internal only).
+
+  report-server:
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.21-professional}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${JRS_HOST_PORT:-9088}:9088"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Existing application variables only (see go-report-server/.env.example).
+      JRS_LISTEN_ADDR: "0.0.0.0:9088"
+      JRS_JASPER_HOME: /opt/acugis-report-server
+      JRS_DB_HOST: ${JRS_DB_HOST:-postgres}
+      JRS_DB_PORT: ${JRS_DB_PORT:-5432}
+      JRS_JASPER_INTERNAL_REPORT_URL: http://127.0.0.1:8080/report
+      JRS_JASPER_INTERNAL_IMAGE_URL: http://127.0.0.1:8080/acugis_report_image
+      CATALINA_HOME: /usr/local/tomcat
+      CATALINA_BASE: /usr/local/tomcat
+      JRS_JRXML_DIR: /usr/local/tomcat/acugis/reports
+      JRS_JASPER_CONTEXT_PATH: /usr/local/tomcat/conf/context.xml
+      JRS_JASPER_REPORTS_CONTAINER_DIR: /usr/local/tomcat/acugis/reports
+      JRS_RESOURCE_PATHS_DIR: /usr/local/tomcat/acugis/resource-paths
+      JRS_GEOSERVER_CONNECTIONS_PATH: /usr/local/tomcat/conf/geoserver-connections.properties
+      JRS_QGIS_CONNECTIONS_PATH: /usr/local/tomcat/conf/qgis-connections.properties
+      JRS_QGIS_UPSTREAM: ${JRS_QGIS_UPSTREAM:-http://qgis-server}
+      JRS_QGIS_MAP_PREFIX: ${JRS_QGIS_MAP_PREFIX:-/qgis/projects}
+      JRS_ARCGIS_CONNECTIONS_PATH: /usr/local/tomcat/conf/arcgis-connections.properties
+      ACUGIS_DUCKDB_HOME: /opt/acugis-report-server/var/duckdb
+      ACUGIS_REPORTS_DIR: /usr/local/tomcat/acugis/reports
+      ACUGIS_UPLOADS_DIR: /usr/local/tomcat/acugis/uploads
+      ACUGIS_FONTS_DIR: /usr/local/tomcat/acugis/fonts
+      ACUGIS_DRIVERS_DIR: /usr/local/tomcat/acugis/drivers
+      ACUGIS_LICENSES_DIR: /usr/local/tomcat/acugis/licenses
+      ACUGIS_TEMP_DIR: /usr/local/tomcat/temp
+      ACUGIS_RESOURCE_PATHS_DIR: /usr/local/tomcat/acugis/resource-paths
+      JAVA_OPTS: "-Djava.awt.headless=true -Dfile.encoding=UTF-8"
+      JRS_REPORTS_OWNER: root
+      JRS_REPORTS_GROUP: root
+      # Designer Web 1.0.8 sidecar. Both values are required together.
+      # Proxy timeout and body size stay at the application defaults (120s, 64 MiB).
+      JRS_DESIGNER_UPSTREAM: http://127.0.0.1:8787
+      JRS_DESIGNER_INTERNAL_TOKEN: ${JRS_DESIGNER_INTERNAL_TOKEN:-}
+      JRS_DESIGNER_ASSETS_DIR: /var/lib/acugis-designer-assets
+      ACUGIS_DESIGNER_WEB_VERSION: "1.0.8"
+      WEB_DESIGNER_DATA_DIR: /var/lib/acugis-report-designer-web
+      # Packaging bootstrap (entrypoint only; not read by Go application code).
+      ACUGIS_DOCKER_IMAGE_ROOT: /opt/acugis-image
+      ACUGIS_DOCKER_SEED_DEMO: ${ACUGIS_DOCKER_SEED_DEMO:-1}
+      TZ: ${TZ:-UTC}
+      # Container timer runtime. Native Ubuntu keeps systemd (unset / systemd).
+      JRS_SCHEDULE_RUNTIME: dispatcher
+      # Shared with report-scheduler via report-resources. Not an entitlement bypass.
+      ACUGIS_LICENSE_STATE_DIR: /opt/acugis-report-server/var/license
+    volumes:
+      # App filesystem state (reports/json, resources, schedules, duckdb home, …).
+      # First boot is seeded from /opt/acugis-image by the entrypoint.
+      - report-resources:/opt/acugis-report-server
+      # Tomcat AcuGIS data directory (JRXML, uploads, fonts, resource-paths, …).
+      - report-tomcat-acugis:/usr/local/tomcat/acugis
+      # Customer JDBC jars (IBM Db2, and Oracle when the image does not include it).
+      - ${JRS_JDBC_DRIVERS_PATH:-./jdbc-drivers}:/usr/local/tomcat/acugis/drivers:ro
+      # Persist Tomcat conf files that Go/Tomcat share (context.xml, map connection props).
+      - report-tomcat-conf:/var/acugis/tomcat-conf
+      # Local file datasources (DuckDB / SQLite / GeoPackage, etc.).
+      - ${JRS_DATA_HOST_PATH:-./data}:/data
+      # Designer connection metadata and uploaded CSV/JSON/Excel/XML files.
+      - designer-data:/var/lib/acugis-report-designer-web
+      # frontend/dist seeded by report-designer. Not mounted over the image copy.
+      - designer-assets:/var/lib/acugis-designer-assets:ro
+    healthcheck:
+      # Container health waits for Go /health and Tomcat TCP.
+      # Application GET /ready is unchanged and is not used as the Compose healthcheck.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9088/health >/dev/null && bash -c 'echo >/dev/tcp/127.0.0.1/8080' >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  report-scheduler:
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.21-professional}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      report-server:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ACUGIS_DOCKER_ROLE: scheduler
+      JRS_SCHEDULE_RUNTIME: dispatcher
+      ACUGIS_LICENSE_STATE_DIR: /opt/acugis-report-server/var/license
+      JRS_SCHEDULER_LISTEN_ADDR: ":9089"
+      JRS_SCHEDULER_POLL_INTERVAL: ${JRS_SCHEDULER_POLL_INTERVAL:-15s}
+      JRS_SCHEDULE_RUNNER: /usr/local/bin/jrs-run-schedule
+      TZ: ${TZ:-UTC}
+      JRS_JASPER_HOME: /opt/acugis-report-server
+      JRS_DB_HOST: ${JRS_DB_HOST:-postgres}
+      JRS_DB_PORT: ${JRS_DB_PORT:-5432}
+      # Jasper is reached over the Compose network (not host-published).
+      JRS_JASPER_INTERNAL_REPORT_URL: http://report-server:8080/report
+      JRS_JASPER_INTERNAL_IMAGE_URL: http://report-server:8080/acugis_report_image
+      CATALINA_HOME: /usr/local/tomcat
+      CATALINA_BASE: /usr/local/tomcat
+      JRS_JRXML_DIR: /usr/local/tomcat/acugis/reports
+      JRS_JASPER_CONTEXT_PATH: /usr/local/tomcat/conf/context.xml
+      JRS_JASPER_REPORTS_CONTAINER_DIR: /usr/local/tomcat/acugis/reports
+      JRS_RESOURCE_PATHS_DIR: /usr/local/tomcat/acugis/resource-paths
+      JRS_GEOSERVER_CONNECTIONS_PATH: /usr/local/tomcat/conf/geoserver-connections.properties
+      JRS_QGIS_CONNECTIONS_PATH: /usr/local/tomcat/conf/qgis-connections.properties
+      JRS_QGIS_UPSTREAM: ${JRS_QGIS_UPSTREAM:-http://qgis-server}
+      JRS_QGIS_MAP_PREFIX: ${JRS_QGIS_MAP_PREFIX:-/qgis/projects}
+      JRS_ARCGIS_CONNECTIONS_PATH: /usr/local/tomcat/conf/arcgis-connections.properties
+      ACUGIS_DUCKDB_HOME: /opt/acugis-report-server/var/duckdb
+      ACUGIS_REPORTS_DIR: /usr/local/tomcat/acugis/reports
+      ACUGIS_UPLOADS_DIR: /usr/local/tomcat/acugis/uploads
+      ACUGIS_FONTS_DIR: /usr/local/tomcat/acugis/fonts
+      ACUGIS_DRIVERS_DIR: /usr/local/tomcat/acugis/drivers
+      ACUGIS_LICENSES_DIR: /usr/local/tomcat/acugis/licenses
+      ACUGIS_TEMP_DIR: /usr/local/tomcat/temp
+      ACUGIS_RESOURCE_PATHS_DIR: /usr/local/tomcat/acugis/resource-paths
+      JRS_REPORTS_OWNER: root
+      JRS_REPORTS_GROUP: root
+      # The scheduler loads the same configuration as Report Server. A token
+      # in .env without the upstream makes that process refuse to start.
+      # It does not publish 8787 and does not serve Designer.
+      JRS_DESIGNER_UPSTREAM: http://127.0.0.1:8787
+      JRS_DESIGNER_INTERNAL_TOKEN: ${JRS_DESIGNER_INTERNAL_TOKEN:-}
+    command: ["jrs-schedule-dispatcher"]
+    volumes:
+      - report-resources:/opt/acugis-report-server
+      - report-tomcat-acugis:/usr/local/tomcat/acugis
+      # Customer JDBC jars (IBM Db2, and Oracle when the image does not include it).
+      - ${JRS_JDBC_DRIVERS_PATH:-./jdbc-drivers}:/usr/local/tomcat/acugis/drivers:ro
+      - report-tomcat-conf:/var/acugis/tomcat-conf
+      - ${JRS_DATA_HOST_PATH:-./data}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9089/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  # Designer Web 1.0.8. Same loopback as Tomcat inside report-server.
+  # network_mode attaches to that container's namespace, so this service
+  # cannot publish ports. `docker compose up -d` recreates this service when
+  # the report-server container id changes. Recreate both services together
+  # when replacing report-server by name:
+  #   docker compose up -d --force-recreate report-server report-designer
+  report-designer:
+    image: ${REPORT_DESIGNER_IMAGE:-acugis/report-designer-web:1.0.8}
+    network_mode: "service:report-server"
+    depends_on:
+      report-server:
+        condition: service_healthy
+        restart: true
+    user: "0:0"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      JRS_DESIGNER_MODE: reportserver
+      WEB_DESIGNER_LISTEN: 127.0.0.1:8787
+      JRS_DESIGNER_INTERNAL_TOKEN: ${JRS_DESIGNER_INTERNAL_TOKEN:-}
+      JRS_JASPER_HOME: /opt/acugis-report-server
+      ACUGIS_JASPER_HOME: /usr/lib/acugis-report-designer-web/jasper
+      JRS_JRXML_DIR: /usr/local/tomcat/acugis/reports
+      JRS_RESOURCE_PATHS_DIR: /usr/local/tomcat/acugis/resource-paths
+      JRS_REPORTS_OWNER: root
+      JRS_REPORTS_GROUP: root
+      WEB_DESIGNER_DATA_DIR: /var/lib/acugis-report-designer-web
+      JRS_DB_HOST: ${JRS_DB_HOST:-postgres}
+      JRS_DB_PORT: ${JRS_DB_PORT:-5432}
+      JRS_DB_NAME: ${JRS_DB_NAME:-jasper_reports}
+      JRS_DB_USER: ${JRS_DB_USER:-jasper}
+      JRS_DB_PASS: ${JRS_DB_PASS:-}
+      JRS_DB_SSLMODE: ${JRS_DB_SSLMODE:-disable}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - report-resources:/opt/acugis-report-server
+      - report-tomcat-acugis:/usr/local/tomcat/acugis
+      - ${JRS_DATA_HOST_PATH:-./data}:/data
+      - designer-data:/var/lib/acugis-report-designer-web
+      - designer-assets:/var/lib/acugis-designer-assets
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8787'"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  qgis-server:
+    profiles: ["qgis"]
+    image: camptocamp/qgis-server:3.40
+    # HTTP frontend only (port 80 inside the Compose network). Do not publish
+    # FastCGI. Designer reaches this via Report Server https://host/qgis/.
+    volumes:
+      - ./qgis/projects:/qgis/projects:ro
+      - ./qgis/data:/qgis/data:ro
+    environment:
+      QGIS_SERVER_LOG_LEVEL: "1"
+    restart: unless-stopped
+
+  # One-shot installer. `docker compose run` enables this profile.
+  # `docker compose up` does not start it. The project directory is mounted
+  # so the script can create .env before the rest of the stack starts.
+  report-server-setup:
+    profiles: ["setup"]
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.21-professional}
+    user: "0:0"
+    working_dir: /compose-project
+    entrypoint: ["bash", "/compose-project/report-server-setup.sh"]
+    environment:
+      JRS_SETUP_IMAGE: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.21-professional}
+      JRS_SETUP_DESIGNER_IMAGE: ${REPORT_DESIGNER_IMAGE:-}
+    volumes:
+      - .:/compose-project
+    restart: "no"
+
+volumes:
+  postgres-data:
+  report-resources:
+  report-tomcat-acugis:
+  report-tomcat-conf:
+  designer-data:
+  designer-assets:
