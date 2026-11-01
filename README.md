@@ -1,17 +1,6 @@
-# AcuGIS Report Server Docker
+<h2>AcuGIS Report Server Docker</h2>
 
-git clone https://github.com/AcuGIS/report-server-docker
+<pre><code>git clone https://github.com/AcuGIS/report-server-docker
 cd report-server-docker
 docker compose run --rm -it report-server-setup
-docker compose up -d
-
-
-AcuGIS Report Server Docker
-----------------------------
-
-.. code-block:: bash
-
-   git clone https://github.com/AcuGIS/report-server-docker
-   cd report-server-docker
-   docker compose run --rm -it report-server-setup
-   docker compose up -d
+docker compose up -d</code></pre>
