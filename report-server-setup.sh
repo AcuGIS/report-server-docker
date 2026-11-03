@@ -211,7 +211,7 @@ write_new_env() {
   local tmp="${ENV_FILE}.tmp.$$"
   umask "$UMASK_SET"
   {
-    printf '%s\n' '# AcuGIS Report Server 1.0.21'
+    printf '%s\n' '# AcuGIS Report Server 1.0.22'
     printf '%s\n' '# Created by: docker compose run --rm -it report-server-setup'
     printf '%s\n' '# The internal PostgreSQL password and Designer internal token were generated. Do not commit this file.'
     printf '%s\n' '# Advanced settings can be edited here. Then run: docker compose up -d'
