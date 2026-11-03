@@ -62,7 +62,7 @@ services:
     # Not published to the host by default (internal only).
 
   report-server:
-    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-professional}
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-oss}
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +148,7 @@ services:
     restart: unless-stopped
 
   report-scheduler:
-    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-professional}
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-oss}
     depends_on:
       postgres:
         condition: service_healthy
@@ -281,12 +281,12 @@ services:
   # so the script can create .env before the rest of the stack starts.
   report-server-setup:
     profiles: ["setup"]
-    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-professional}
+    image: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-oss}
     user: "0:0"
     working_dir: /compose-project
     entrypoint: ["bash", "/compose-project/report-server-setup.sh"]
     environment:
-      JRS_SETUP_IMAGE: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-professional}
+      JRS_SETUP_IMAGE: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-oss}
       JRS_SETUP_DESIGNER_IMAGE: ${REPORT_DESIGNER_IMAGE:-}
     volumes:
       - .:/compose-project
