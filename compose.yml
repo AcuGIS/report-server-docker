@@ -286,7 +286,7 @@ services:
     working_dir: /compose-project
     entrypoint: ["bash", "/compose-project/report-server-setup.sh"]
     environment:
-      JRS_SETUP_IMAGE: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.22-oss}
+      JRS_SETUP_IMAGE: ${REPORT_SERVER_IMAGE:-acugis/report-server:1.0.29-oss}
       JRS_SETUP_DESIGNER_IMAGE: ${REPORT_DESIGNER_IMAGE:-}
     volumes:
       - .:/compose-project
